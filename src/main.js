@@ -1,27 +1,57 @@
-import { debounce, Debouncer, EditorPosition, MarkdownView, Plugin, WorkspaceLeaf } from "obsidian";
+import { debounce, Plugin, MarkdownView } from "obsidian";
 import { cursorTrackerExtension } from "./cursor-tracker-extension";
 import QuickLRU from 'quick-lru';
 
-type CursorInfo = {
-  file: string
-  cursor: EditorPosition
-}
+/**
+ * @typedef {Object} CursorInfo
+ * @property {string} file
+ * @property {import("obsidian").EditorPosition} cursor
+ */
 
-type ActiveFileInfo = {
-  path: string
-  initialCursorHasBeenSet: boolean
-}
+/**
+ * @typedef {Object} ActiveFileInfo
+ * @property {string} path
+ * @property {boolean} initialCursorHasBeenSet
+ */
 
-export interface CursorTrackerSettings {
-  fileCursors: CursorInfo[]
-}
+/**
+ * @typedef {Object} CursorTrackerSettings
+ * @property {CursorInfo[]} fileCursors
+ */
 
+/**
+ * @type {import("obsidian").Plugin}
+ */
 export default class CursorTrackerPlugin extends Plugin {
-  settings: CursorTrackerSettings;
-  private lru = new QuickLRU<string, EditorPosition>({ maxSize: 50 });
-  private debounceSaveFn: Debouncer<[], Promise<void>> | null
-  private layoutReady = false;
-  private activeFile: ActiveFileInfo = { path: '', initialCursorHasBeenSet: false };
+  /**
+   * @private
+   * @type {CursorTrackerSettings}
+   */
+  settings = { fileCursors: [] };
+
+  /**
+   * @private
+   * @type {QuickLRU<string, import("obsidian").EditorPosition>}
+   */
+  lru = new QuickLRU({ maxSize: 50 });
+
+  /**
+   * @private
+   * @type {import("obsidian").Debouncer<[], Promise<void>> | null}
+   */
+  debounceSaveFn = null;
+
+  /**
+   * @private
+   * @type {boolean}
+   */
+  layoutReady = false;
+
+  /**
+   * @private
+   * @type {ActiveFileInfo}
+   */
+  activeFile = { path: '', initialCursorHasBeenSet: false };
 
   async onload() {
     await this.loadSettings();
@@ -47,14 +77,14 @@ export default class CursorTrackerPlugin extends Plugin {
     });
   }
 
-  async onunload(): Promise<void> {
+  async onunload() {
     return await this.save();
   }
 
   async loadSettings() {
     const data = await this.loadData();
 
-    this.settings = Object.assign({}, { fileCursors: [] }, data);
+    this.settings = Object.assign({}, this.settings, data);
 
     for (const cursorInfo of this.settings.fileCursors) {
       this.lru.set(cursorInfo.file, cursorInfo.cursor);
@@ -65,15 +95,13 @@ export default class CursorTrackerPlugin extends Plugin {
 
   saveSettings() {
     if (this.debounceSaveFn) {
-      this.debounceSaveFn()
-
-      return
+      this.debounceSaveFn();
+      return;
     }
 
     this.debounceSaveFn = debounce(
       async () => {
         this.debounceSaveFn = null;
-
         await this.save();
       },
       10000,
@@ -83,9 +111,12 @@ export default class CursorTrackerPlugin extends Plugin {
     this.debounceSaveFn();
   }
 
-  private async save() {
-    // console.log('save hit...');
-    const fileCursors: CursorInfo[] = [];
+  /**
+   * @private
+   */
+  async save() {
+    /** @type {CursorInfo[]} */
+    const fileCursors = [];
     for (const entry of this.lru.entriesAscending()) {
       fileCursors.push({
         file: entry[0],
@@ -112,13 +143,15 @@ export default class CursorTrackerPlugin extends Plugin {
       // console.log('update detected (old, new)', this.settings.fileCursors, fileCursors);
       this.settings.fileCursors = fileCursors;
       await this.saveData(this.settings);
-    } /*else {
+    }/*else {
       console.log('no true update');
     }*/
   }
 
-  private onOpen() {
-    // console.log('open attempting...')
+  /**
+   * @private
+   */
+  onOpen() {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view || !view.file) {
       // console.log('View not ready yet...', view);
@@ -132,7 +165,7 @@ export default class CursorTrackerPlugin extends Plugin {
       // console.log('desired cursor: ', desiredCursorPosition);
 
       const currentCursorPosition = view.editor.getCursor();
-      if (desiredCursorPosition && !currentCursorPosition || (currentCursorPosition.ch === 0 && currentCursorPosition.line === 0)) {
+      if (desiredCursorPosition && (!currentCursorPosition || (currentCursorPosition.ch === 0 && currentCursorPosition.line === 0))) {
         // console.log('cursor is at the 0, 0 state, so updating it for file ' + currentActiveFile.path + ': ', desiredCursorPosition);
         view.editor.setCursor(desiredCursorPosition ?? 0);
         view.editor.scrollIntoView({
@@ -140,9 +173,9 @@ export default class CursorTrackerPlugin extends Plugin {
           from: desiredCursorPosition,
         }, true);
       } else {
+        // console.log('cursor is at a non-zero spot already, so skipping setting its position for file ' + currentActiveFile.path + ': ', currentCursorPosition);
         this.lru.set(view.file.path, currentCursorPosition);
         this.saveSettings();
-        // console.log('cursor is at a non-zero spot already, so skipping setting its position for file ' + currentActiveFile.path + ': ', currentCursorPosition);
       }
     }
   }
@@ -164,7 +197,8 @@ export default class CursorTrackerPlugin extends Plugin {
       return;
     }
 
-    let oldCursorPosition: EditorPosition | undefined = undefined
+    /** @type {import("obsidian").EditorPosition | undefined} */
+    let oldCursorPosition = undefined;
     if (this.lru.has(activeLeaf.file.path)) {
       oldCursorPosition = this.lru.get(activeLeaf.file.path);
     }
@@ -173,7 +207,7 @@ export default class CursorTrackerPlugin extends Plugin {
     // console.log(activeLeaf.file.path, oldCursorPosition, currentCursorPosition)
     if (!oldCursorPosition || (currentCursorPosition && oldCursorPosition &&
       (currentCursorPosition.ch !== oldCursorPosition.ch ||
-      currentCursorPosition.line !== oldCursorPosition.line)
+        currentCursorPosition.line !== oldCursorPosition.line)
     )) {
       // console.log('current and old positions are different (old, new) for file ' + activeLeaf.file.path + ': ', oldCursorPosition, currentCursorPosition);
       this.lru.set(activeLeaf.file.path, currentCursorPosition);
@@ -181,7 +215,12 @@ export default class CursorTrackerPlugin extends Plugin {
     }
   }
 
-  private renameFile(newPath: string, oldPath: string) {
+  /**
+   * @private
+   * @param {string} newPath 
+   * @param {string} oldPath 
+   */
+  renameFile(newPath, oldPath) {
     if (this.lru.has(oldPath)) {
       const cursorPosition = this.lru.get(oldPath);
       this.lru.delete(oldPath);
@@ -194,7 +233,10 @@ export default class CursorTrackerPlugin extends Plugin {
     }
   }
 
-  deleteFile(path: string) {
+  /**
+   * @param {string} path 
+   */
+  deleteFile(path) {
     this.lru.delete(path);
     this.saveSettings();
   }

@@ -59,6 +59,8 @@ export default class CursorTrackerPlugin extends Plugin {
     for (const cursorInfo of this.settings.fileCursors) {
       this.lru.set(cursorInfo.file, cursorInfo.cursor);
     }
+
+    // console.log('initial state: ', this.settings.fileCursors);
   }
 
   saveSettings() {
@@ -77,9 +79,12 @@ export default class CursorTrackerPlugin extends Plugin {
       10000,
       true,
     );
+
+    this.debounceSaveFn();
   }
 
   private async save() {
+    // console.log('save hit...');
     const fileCursors: CursorInfo[] = [];
     for (const entry of this.lru.entriesAscending()) {
       fileCursors.push({
@@ -104,41 +109,47 @@ export default class CursorTrackerPlugin extends Plugin {
     }
 
     if (updateSettings) {
-      console.log('update detected (old, new)', this.settings.fileCursors, fileCursors);
+      // console.log('update detected (old, new)', this.settings.fileCursors, fileCursors);
       this.settings.fileCursors = fileCursors;
       await this.saveData(this.settings);
-    } else {
+    } /*else {
       console.log('no true update');
-    }
+    }*/
   }
 
   private onOpen() {
+    // console.log('open attempting...')
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || !view.file) return;
+    if (!view || !view.file) {
+      // console.log('View not ready yet...', view);
+      return;
+    }
 
     const currentActiveFile = view.file;
     if (currentActiveFile && currentActiveFile.path && this.lru.has(currentActiveFile.path)) {
       const desiredCursorPosition = this.lru.get(currentActiveFile.path) ?? { ch: 0, line: 0 };
-      console.log('open file detected for ' + currentActiveFile.path);
-      console.log('desired cursor: ', desiredCursorPosition);
+      // console.log('open file detected for ' + currentActiveFile.path);
+      // console.log('desired cursor: ', desiredCursorPosition);
 
       const currentCursorPosition = view.editor.getCursor();
       if (desiredCursorPosition && !currentCursorPosition || (currentCursorPosition.ch === 0 && currentCursorPosition.line === 0)) {
-        console.log('cursor is at the 0, 0 state, so updating it for file ' + currentActiveFile.path + ': ', desiredCursorPosition);
+        // console.log('cursor is at the 0, 0 state, so updating it for file ' + currentActiveFile.path + ': ', desiredCursorPosition);
         view.editor.setCursor(desiredCursorPosition ?? 0);
         view.editor.scrollIntoView({
           to: desiredCursorPosition,
           from: desiredCursorPosition,
         }, true);
       } else {
-        console.log('cursor is at a non-zero spot already, so skipping setting its position for file ' + currentActiveFile.path + ': ', currentCursorPosition);
+        this.lru.set(view.file.path, currentCursorPosition);
+        this.saveSettings();
+        // console.log('cursor is at a non-zero spot already, so skipping setting its position for file ' + currentActiveFile.path + ': ', currentCursorPosition);
       }
     }
   }
 
   async updateCursorPosition() {
     if (!this.layoutReady) {
-      console.log('Skipping cursor position update due to layout not yet having settled.')
+      // console.log('Skipping cursor position update due to layout not yet having settled.')
       return;
     }
 
@@ -146,10 +157,11 @@ export default class CursorTrackerPlugin extends Plugin {
     if (!activeLeaf || !activeLeaf.file) return;
 
     if (activeLeaf.file.path !== this.activeFile.path) {
-      console.log('Current active file and the expected active file differ, so the cursor is not ready to have its value updated (old, new)', this.activeFile.path, activeLeaf.file.path);
+      // console.log('Current active file and the expected active file differ, so the cursor is not ready to have its value updated (old, new)', this.activeFile.path, activeLeaf.file.path);
       return;
     } else if (!this.activeFile.initialCursorHasBeenSet) {
-      console.log('Skipping cursor position update due to initial cursor not having run for the file yet.');
+      // console.log('Skipping cursor position update due to initial cursor not having run for the file yet.');
+      return;
     }
 
     let oldCursorPosition: EditorPosition | undefined = undefined
@@ -158,12 +170,12 @@ export default class CursorTrackerPlugin extends Plugin {
     }
 
     const currentCursorPosition = activeLeaf.editor.getCursor();
-    console.log(activeLeaf.file.path, oldCursorPosition, currentCursorPosition)
-    if (currentCursorPosition && oldCursorPosition &&
-      currentCursorPosition.ch === oldCursorPosition.ch &&
-      currentCursorPosition.line === oldCursorPosition.line
-    ) {
-      console.log('current and old positions are different (old, new) for file ' + activeLeaf.file.path + ': ', oldCursorPosition, currentCursorPosition);
+    // console.log(activeLeaf.file.path, oldCursorPosition, currentCursorPosition)
+    if (!oldCursorPosition || (currentCursorPosition && oldCursorPosition &&
+      (currentCursorPosition.ch !== oldCursorPosition.ch ||
+      currentCursorPosition.line !== oldCursorPosition.line)
+    )) {
+      // console.log('current and old positions are different (old, new) for file ' + activeLeaf.file.path + ': ', oldCursorPosition, currentCursorPosition);
       this.lru.set(activeLeaf.file.path, currentCursorPosition);
       this.saveSettings();
     }

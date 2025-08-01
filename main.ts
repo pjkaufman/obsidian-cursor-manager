@@ -1,134 +1,189 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { debounce, Debouncer, EditorPosition, MarkdownView, Plugin, WorkspaceLeaf } from "obsidian";
+import { cursorTrackerExtension } from "./cursor-tracker-extension";
+import QuickLRU from 'quick-lru';
 
-// Remember to rename these classes and interfaces!
-
-interface MyPluginSettings {
-	mySetting: string;
+type CursorInfo = {
+  file: string
+  cursor: EditorPosition
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+type ActiveFileInfo = {
+  path: string
+  initialCursorHasBeenSet: boolean
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
-
-	async onload() {
-		await this.loadSettings();
-
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-			}
-		});
-
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-	}
-
-	onunload() {
-
-	}
-
-	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
-	}
-
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+export interface CursorTrackerSettings {
+  fileCursors: CursorInfo[]
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+export default class CursorTrackerPlugin extends Plugin {
+  settings: CursorTrackerSettings;
+  private lru = new QuickLRU<string, EditorPosition>({ maxSize: 50 });
+  private debounceSaveFn: Debouncer<[], Promise<void>> | null
+  private layoutReady = false;
+  private activeFile: ActiveFileInfo = { path: '', initialCursorHasBeenSet: false };
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
+  async onload() {
+    await this.loadSettings();
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
+    this.registerEditorExtension(cursorTrackerExtension(this));
+    this.registerEvent(this.app.workspace.on('file-open', (file) => {
+      this.activeFile.path = file?.path ?? '';
+      this.activeFile.initialCursorHasBeenSet = false;
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+      this.onOpen();
 
-	constructor(app: App, plugin: MyPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
+      this.activeFile.initialCursorHasBeenSet = true;
+    }));
 
-	display(): void {
-		const {containerEl} = this;
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.renameFile(file.path, oldPath)));
+    this.registerEvent(this.app.vault.on('delete', (file) => this.deleteFile(file.path)));
+    this.registerEvent(this.app.workspace.on('quit', async () => await this.save()));
 
-		containerEl.empty();
+    // Only allow updating the cursor states once the layout is ready to allow for the first file
+    // to properly get its cursor set
+    this.app.workspace.onLayoutReady(() => {
+      this.layoutReady = true
+    });
+  }
 
-		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
-			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
-				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+  async onunload(): Promise<void> {
+    return await this.save();
+  }
+
+  async loadSettings() {
+    const data = await this.loadData();
+
+    this.settings = Object.assign({}, { fileCursors: [] }, data);
+
+    for (const cursorInfo of this.settings.fileCursors) {
+      this.lru.set(cursorInfo.file, cursorInfo.cursor);
+    }
+  }
+
+  saveSettings() {
+    if (this.debounceSaveFn) {
+      this.debounceSaveFn()
+
+      return
+    }
+
+    this.debounceSaveFn = debounce(
+      async () => {
+        this.debounceSaveFn = null;
+
+        await this.save();
+      },
+      10000,
+      true,
+    );
+  }
+
+  private async save() {
+    const fileCursors: CursorInfo[] = [];
+    for (const entry of this.lru.entriesAscending()) {
+      fileCursors.push({
+        file: entry[0],
+        cursor: entry[1],
+      });
+    }
+
+    let updateSettings = false;
+    if (this.settings.fileCursors.length === fileCursors.length) {
+      for (let i = 0; i < fileCursors.length; i++) {
+        if (this.settings.fileCursors[i].file !== fileCursors[i].file ||
+          this.settings.fileCursors[i].cursor.ch !== fileCursors[i].cursor.ch ||
+          this.settings.fileCursors[i].cursor.line !== fileCursors[i].cursor.line
+        ) {
+          updateSettings = true;
+          break;
+        }
+      }
+    } else {
+      updateSettings = true;
+    }
+
+    if (updateSettings) {
+      console.log('update detected (old, new)', this.settings.fileCursors, fileCursors);
+      this.settings.fileCursors = fileCursors;
+      await this.saveData(this.settings);
+    } else {
+      console.log('no true update');
+    }
+  }
+
+  private onOpen() {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || !view.file) return;
+
+    const currentActiveFile = view.file;
+    if (currentActiveFile && currentActiveFile.path && this.lru.has(currentActiveFile.path)) {
+      const desiredCursorPosition = this.lru.get(currentActiveFile.path) ?? { ch: 0, line: 0 };
+      console.log('open file detected for ' + currentActiveFile.path);
+      console.log('desired cursor: ', desiredCursorPosition);
+
+      const currentCursorPosition = view.editor.getCursor();
+      if (desiredCursorPosition && !currentCursorPosition || (currentCursorPosition.ch === 0 && currentCursorPosition.line === 0)) {
+        console.log('cursor is at the 0, 0 state, so updating it for file ' + currentActiveFile.path + ': ', desiredCursorPosition);
+        view.editor.setCursor(desiredCursorPosition ?? 0);
+        view.editor.scrollIntoView({
+          to: desiredCursorPosition,
+          from: desiredCursorPosition,
+        }, true);
+      } else {
+        console.log('cursor is at a non-zero spot already, so skipping setting its position for file ' + currentActiveFile.path + ': ', currentCursorPosition);
+      }
+    }
+  }
+
+  async updateCursorPosition() {
+    if (!this.layoutReady) {
+      console.log('Skipping cursor position update due to layout not yet having settled.')
+      return;
+    }
+
+    const activeLeaf = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!activeLeaf || !activeLeaf.file) return;
+
+    if (activeLeaf.file.path !== this.activeFile.path) {
+      console.log('Current active file and the expected active file differ, so the cursor is not ready to have its value updated (old, new)', this.activeFile.path, activeLeaf.file.path);
+      return;
+    } else if (!this.activeFile.initialCursorHasBeenSet) {
+      console.log('Skipping cursor position update due to initial cursor not having run for the file yet.');
+    }
+
+    let oldCursorPosition: EditorPosition | undefined = undefined
+    if (this.lru.has(activeLeaf.file.path)) {
+      oldCursorPosition = this.lru.get(activeLeaf.file.path);
+    }
+
+    const currentCursorPosition = activeLeaf.editor.getCursor();
+    console.log(activeLeaf.file.path, oldCursorPosition, currentCursorPosition)
+    if (currentCursorPosition && oldCursorPosition &&
+      currentCursorPosition.ch === oldCursorPosition.ch &&
+      currentCursorPosition.line === oldCursorPosition.line
+    ) {
+      console.log('current and old positions are different (old, new) for file ' + activeLeaf.file.path + ': ', oldCursorPosition, currentCursorPosition);
+      this.lru.set(activeLeaf.file.path, currentCursorPosition);
+      this.saveSettings();
+    }
+  }
+
+  private renameFile(newPath: string, oldPath: string) {
+    if (this.lru.has(oldPath)) {
+      const cursorPosition = this.lru.get(oldPath);
+      this.lru.delete(oldPath);
+
+      if (cursorPosition != undefined) {
+        this.lru.set(newPath, cursorPosition);
+      }
+
+      this.saveSettings();
+    }
+  }
+
+  deleteFile(path: string) {
+    this.lru.delete(path);
+    this.saveSettings();
+  }
 }

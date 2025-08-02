@@ -11,7 +11,9 @@ import QuickLRU from 'quick-lru';
 /**
  * @typedef {Object} ActiveFileInfo
  * @property {string} path
- * @property {boolean} initialCursorHasBeenSet
+ * @property {boolean} initialZeroZeroReceived Whether or not the initial zero zero has been received or not for file.
+ * This is needed to handle the scenario where you first set have `onOpen` run and have not yet received the view plugin's
+ * first 0, 0 cursor position update. When this happens we need to go ahead and set the cursor back to its original position again.
  */
 
 /**
@@ -43,6 +45,12 @@ export default class CursorTrackerPlugin extends Plugin {
 
   /**
    * @private
+   * @type {import("obsidian").Debouncer<[], void> | null}
+   */
+  initialFileRestoreFn = null;
+
+  /**
+   * @private
    * @type {boolean}
    */
   layoutReady = false;
@@ -51,7 +59,7 @@ export default class CursorTrackerPlugin extends Plugin {
    * @private
    * @type {ActiveFileInfo}
    */
-  activeFile = { path: '', initialCursorHasBeenSet: false };
+  activeFile = { path: '', initialZeroZeroReceived: false };
 
   async onload() {
     await this.loadSettings();
@@ -59,11 +67,13 @@ export default class CursorTrackerPlugin extends Plugin {
     this.registerEditorExtension(cursorTrackerExtension(this));
     this.registerEvent(this.app.workspace.on('file-open', (file) => {
       this.activeFile.path = file?.path ?? '';
-      this.activeFile.initialCursorHasBeenSet = false;
+      this.activeFile.initialZeroZeroReceived = false;
 
-      this.onOpen();
+      this.initialFileRestoreFn = debounce(() => {
+        this.restoreCursorPosition();
+      }, 100, true);
 
-      this.activeFile.initialCursorHasBeenSet = true;
+      this.initialFileRestoreFn();
     }));
 
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => this.renameFile(file.path, oldPath)));
@@ -74,11 +84,29 @@ export default class CursorTrackerPlugin extends Plugin {
     // to properly get its cursor set
     this.app.workspace.onLayoutReady(() => {
       this.layoutReady = true
+
+      // if the active file path is not set, we will want to handle that here
+      // Note: this is for when the plugin is loaded after the app loads
+      if (this.activeFile.path != '') {
+        return;
+      }
+
+      const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+      if (!view || !view.file) {
+        return;
+      }
+
+      this.activeFile.path = view.file?.path ?? '';
+      this.activeFile.initialZeroZeroReceived = true;
     });
   }
 
   async onunload() {
     return await this.save();
+  }
+
+  async onExternalSettingsChange() {
+    await this.loadSettings();
   }
 
   async loadSettings() {
@@ -143,7 +171,7 @@ export default class CursorTrackerPlugin extends Plugin {
       // console.log('update detected (old, new)', this.settings.fileCursors, fileCursors);
       this.settings.fileCursors = fileCursors;
       await this.saveData(this.settings);
-    }/*else {
+    }/* else {
       console.log('no true update');
     }*/
   }
@@ -151,7 +179,7 @@ export default class CursorTrackerPlugin extends Plugin {
   /**
    * @private
    */
-  onOpen() {
+  restoreCursorPosition() {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view || !view.file) {
       // console.log('View not ready yet...', view);
@@ -178,11 +206,14 @@ export default class CursorTrackerPlugin extends Plugin {
         this.saveSettings();
       }
     }
+
+    this.initialFileRestoreFn = null;
   }
 
   async updateCursorPosition() {
     if (!this.layoutReady) {
-      // console.log('Skipping cursor position update due to layout not yet having settled.')
+      // console.log('Skipping cursor position update due to layout not yet having settled.');
+      this.activeFile.initialZeroZeroReceived = true;
       return;
     }
 
@@ -190,12 +221,19 @@ export default class CursorTrackerPlugin extends Plugin {
     if (!activeLeaf || !activeLeaf.file) return;
 
     if (activeLeaf.file.path !== this.activeFile.path) {
+      // Need to see if it is possible to hit this block and not have set initial zero zero to true...
       // console.log('Current active file and the expected active file differ, so the cursor is not ready to have its value updated (old, new)', this.activeFile.path, activeLeaf.file.path);
+      // console.log(activeLeaf.editor.getCursor());
       return;
-    } else if (!this.activeFile.initialCursorHasBeenSet) {
+    } else if (this.initialFileRestoreFn != null) {
+      this.activeFile.initialZeroZeroReceived = true;
       // console.log('Skipping cursor position update due to initial cursor not having run for the file yet.');
+      this.initialFileRestoreFn();
       return;
     }
+
+
+    // console.log('File ' + activeLeaf.file.path + ' is ready for cursor updates.');
 
     /** @type {import("obsidian").EditorPosition | undefined} */
     let oldCursorPosition = undefined;
@@ -204,6 +242,18 @@ export default class CursorTrackerPlugin extends Plugin {
     }
 
     const currentCursorPosition = activeLeaf.editor.getCursor();
+    // check for a situation where we have restored the cursor position, but the 
+    if (!this.activeFile.initialZeroZeroReceived && currentCursorPosition.ch === 0 && currentCursorPosition.line === 0) {
+      // console.log('Out of order operations where the cursor position was restored before the initial zero zero was encountered, re-restoring the cursor position for file ' + activeLeaf.file.path);
+      setTimeout(() => {
+        this.restoreCursorPosition();
+      }, 200);
+
+      return;
+    }
+
+    this.activeFile.initialZeroZeroReceived = true;
+
     // console.log(activeLeaf.file.path, oldCursorPosition, currentCursorPosition)
     if (!oldCursorPosition || (currentCursorPosition && oldCursorPosition &&
       (currentCursorPosition.ch !== oldCursorPosition.ch ||

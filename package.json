@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-cursor-manager",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "Manages the cursor for some of the most recent files visited in Obsidian.",
 	"main": "src/main.js",
 	"scripts": {

@@ -1,4 +1,4 @@
-import { debounce, Plugin, MarkdownView } from "obsidian";
+import { debounce, Plugin, MarkdownView, Platform } from "obsidian";
 import { cursorTrackerExtension } from "./cursor-tracker-extension";
 import QuickLRU from 'quick-lru';
 
@@ -68,6 +68,13 @@ export default class CursorTrackerPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on('file-open', (file) => {
       this.activeFile.path = file?.path ?? '';
       this.activeFile.initialZeroZeroReceived = false;
+
+      if (Platform.isMobile) {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (view && view.editor && !view.editor.hasFocus()) {
+          view.editor.focus();
+        }
+      }
 
       this.initialFileRestoreFn = debounce(() => {
         this.restoreCursorPosition();

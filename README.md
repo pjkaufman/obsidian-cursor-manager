@@ -1,4 +1,4 @@
-# Obsidian Cursor Manager
+# Cursor Manager
 
 This plugin keeps track of the last cursor position in a Markdown note for the 50 Markdown notes that were most recently accessed. It should passively just work in the background. It should not cause any performance issues or weird glitches.
 
